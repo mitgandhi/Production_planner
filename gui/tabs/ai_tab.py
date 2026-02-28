@@ -487,18 +487,27 @@ class AITab(QWidget):
 
     def on_model_ready(self, success: bool, message: str):
         """Called from MainWindow after ModelManager finishes loading."""
+        from gui.model_manager import ModelManager
+        mm = ModelManager.get()
+
         if success:
             self._model_dot.setStyleSheet("color: #a6e3a1; font-size: 14px;")
-            self._model_status_lbl.setText("Qwen3-VL 2B  •  Ready")
             self._model_prog.hide()
+
+            # Show full device info in status bar and sidebar
+            dev = mm.device_info
+            is_gpu = "GPU" in dev
+            device_label = "GPU  ✓" if is_gpu else "CPU"
+            self._model_status_lbl.setText(f"Qwen3-VL 2B  •  Ready  •  {device_label}")
             self._model_info_lbl.setText(
-                "Qwen3-VL 2B\nDevice: CPU\nStatus: ✓ Ready\nTokenizer: Qwen2Tokenizer"
+                f"Qwen3-VL 2B\n{dev}\nStatus: ✓ Ready\nTokenizer: Qwen2Tokenizer"
             )
-            self._append_system("Model loaded and ready. Start chatting!")
+            self._append_system(f"Model ready on {dev}")
         else:
             self._model_dot.setStyleSheet("color: #f38ba8; font-size: 14px;")
             self._model_status_lbl.setText(f"Model error: {message[:60]}")
             self._model_prog.hide()
+            self._model_info_lbl.setText(f"Status: ✗ Failed\n{message[:120]}")
             self._append_system(f"⚠ Model failed to load: {message}")
 
     def set_analysis_data(

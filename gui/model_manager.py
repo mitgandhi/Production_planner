@@ -41,6 +41,7 @@ class ModelManager:
         self._ready = threading.Event()
         self._error: str = ""
         self._loading = False
+        self.device_info: str = "unknown"   # set after load
 
     # ------------------------------------------------------------------
     # Public API
@@ -67,28 +68,43 @@ class ModelManager:
 
     def _load(self, callback=None):
         try:
-            from transformers import (
-                Qwen3VLForConditionalGeneration,
-                AutoTokenizer,
-            )
+            from transformers import Qwen3VLForConditionalGeneration, AutoTokenizer
             import torch
+
+            # ── device / dtype selection ──────────────────────────────
+            if torch.cuda.is_available():
+                device_map = "cuda"
+                dtype      = torch.bfloat16          # RTX 50xx natively supports BF16
+                gpu_name   = torch.cuda.get_device_name(0)
+                free_gb    = torch.cuda.mem_get_info(0)[0] / 1e9
+                self.device_info = f"GPU  {gpu_name}  ({free_gb:.1f} GB free)  •  bfloat16"
+            else:
+                device_map = "cpu"
+                dtype      = torch.float32
+                self.device_info = "CPU  •  float32  (no CUDA GPU detected)"
 
             self._tokenizer = AutoTokenizer.from_pretrained(
                 MODEL_DIR, trust_remote_code=True
             )
             self._model = Qwen3VLForConditionalGeneration.from_pretrained(
                 MODEL_DIR,
-                dtype=torch.float32,
-                device_map="cpu",
+                dtype=dtype,
+                device_map=device_map,
                 trust_remote_code=True,
             )
             self._model.eval()
+
+            # report VRAM used after load
+            if torch.cuda.is_available():
+                used_gb = (torch.cuda.mem_get_info(0)[1] - torch.cuda.mem_get_info(0)[0]) / 1e9
+                self.device_info += f"  •  VRAM used: {used_gb:.2f} GB"
+
             self._ready.set()
             if callback:
-                callback(True, "Qwen3-VL model ready.")
+                callback(True, f"Qwen3-VL ready on {self.device_info}")
         except Exception as exc:
             self._error = str(exc)
-            self._ready.set()          # unblock any waiters
+            self._ready.set()
             if callback:
                 callback(False, f"Model load failed: {exc}")
 
@@ -123,17 +139,18 @@ class ModelManager:
         )
         inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
 
-        gen_kwargs = dict(
+        from transformers import GenerationConfig
+        gen_cfg = GenerationConfig(
             max_new_tokens=max_new_tokens,
-            temperature=temperature,
+            do_sample=(temperature > 0),
+            temperature=temperature if temperature > 0 else 1.0,
             top_p=top_p,
             top_k=top_k,
-            do_sample=(temperature > 0),
             pad_token_id=self._tokenizer.eos_token_id,
         )
 
         with torch.no_grad():
-            output_ids = self._model.generate(**inputs, **gen_kwargs)
+            output_ids = self._model.generate(**inputs, generation_config=gen_cfg)
 
         new_ids = output_ids[0][inputs.input_ids.shape[-1]:]
         response = self._tokenizer.decode(new_ids, skip_special_tokens=True)
