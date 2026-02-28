@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (large CSV – add selectively)
+# Data/AI_DATA.CSV   # uncomment to exclude raw data
+
+# Model weights (large binaries)
+models/*.bin
+models/*.safetensors
+models/*.gguf
+models/*.ggml
+models/qwen*/
+models/*/
+
+# Compiled Python
+*.pyc

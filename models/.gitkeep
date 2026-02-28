@@ -1,0 +1,7 @@
+# Place your Qwen 3 model files here.
+# Expected structure:
+#   models/
+#     qwen3/
+#       config.json
+#       tokenizer.json
+#       model weights ...
