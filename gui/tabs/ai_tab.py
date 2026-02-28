@@ -134,7 +134,8 @@ def _render_markdown(text: str) -> str:
         elif re.match(r'^[\u2022\u2023\u25E6\u2043] ', s):   # unicode bullets
             out.append(f'<li style="margin:2px 0;">{s[2:]}</li>')
         elif re.match(r'^\d+\.\s', s):   # numbered list
-            out.append(f'<li style="margin:2px 0;">{re.sub(r"^\d+\.\s", "", s)}</li>')
+            item_text = re.sub(r'^\d+\.\s', '', s)
+            out.append(f'<li style="margin:2px 0;">{item_text}</li>')
         else:
             out.append(line)
     return "<br>".join(out)
