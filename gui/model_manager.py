@@ -5,6 +5,12 @@ Singleton that owns the Qwen3-VL model lifecycle:
   - Loads once in a background thread at app start
   - Exposes a blocking generate() call (run inside a QThread from the UI)
   - Safe to call generate() before load completes – it blocks until ready
+
+Windows note:
+  torch is imported at module level here so it is resolved on the main thread
+  (where main.py has already registered CUDA DLL paths).  Importing torch for
+  the first time inside a background thread on Windows can trigger:
+      "a dynamic dll initialization routine failed"
 """
 
 from __future__ import annotations
@@ -12,6 +18,15 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional
+
+# ── Import torch at module level so CUDA DLLs are loaded on the main thread ──
+# main.py calls os.add_dll_directory() and torch.cuda.is_available() before
+# this module is imported, which ensures the DLL search paths are set up.
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 
 MODEL_DIR = str(Path(__file__).parent.parent / "models" / "Qwen3")
 
@@ -69,15 +84,20 @@ class ModelManager:
     def _load(self, callback=None):
         try:
             from transformers import Qwen3VLForConditionalGeneration, AutoTokenizer
-            import torch
 
-            # ── device / dtype selection ──────────────────────────────
+            # torch is already imported at module level – just use it directly
+            if not _TORCH_AVAILABLE:
+                raise RuntimeError("torch is not installed.")
+
+            # ── device / dtype selection ───────────────────────────────
             if torch.cuda.is_available():
                 device_map = "cuda"
                 dtype      = torch.bfloat16          # RTX 50xx natively supports BF16
                 gpu_name   = torch.cuda.get_device_name(0)
                 free_gb    = torch.cuda.mem_get_info(0)[0] / 1e9
-                self.device_info = f"GPU  {gpu_name}  ({free_gb:.1f} GB free)  •  bfloat16"
+                self.device_info = (
+                    f"GPU  {gpu_name}  ({free_gb:.1f} GB free)  •  bfloat16"
+                )
             else:
                 device_map = "cpu"
                 dtype      = torch.float32
@@ -88,7 +108,7 @@ class ModelManager:
             )
             self._model = Qwen3VLForConditionalGeneration.from_pretrained(
                 MODEL_DIR,
-                dtype=dtype,
+                torch_dtype=dtype,
                 device_map=device_map,
                 trust_remote_code=True,
             )
@@ -96,12 +116,15 @@ class ModelManager:
 
             # report VRAM used after load
             if torch.cuda.is_available():
-                used_gb = (torch.cuda.mem_get_info(0)[1] - torch.cuda.mem_get_info(0)[0]) / 1e9
+                total_b = torch.cuda.mem_get_info(0)[1]
+                free_b  = torch.cuda.mem_get_info(0)[0]
+                used_gb = (total_b - free_b) / 1e9
                 self.device_info += f"  •  VRAM used: {used_gb:.2f} GB"
 
             self._ready.set()
             if callback:
-                callback(True, f"Qwen3-VL ready on {self.device_info}")
+                callback(True, f"Qwen3-VL ready  •  {self.device_info}")
+
         except Exception as exc:
             self._error = str(exc)
             self._ready.set()
@@ -128,8 +151,6 @@ class ModelManager:
 
         if self._model is None:
             return f"[Model not loaded: {self._error}]"
-
-        import torch
 
         text = self._tokenizer.apply_chat_template(
             messages,
@@ -179,53 +200,53 @@ def build_system_prompt(
         "Answer questions analytically. Use the data context below as your knowledge base.",
         "Be concise, precise, and always support recommendations with numbers from the data.",
         "",
-        "═══ DATASET OVERVIEW ═══",
+        "=== DATASET OVERVIEW ===",
     ]
 
     # Dataset summary
     if summary:
         lines += [
-            f"• Total records  : {summary.get('total_records', 'N/A'):,}",
-            f"• Unique SKUs    : {summary.get('unique_skus', 'N/A')}",
-            f"• Unique sizes   : {summary.get('unique_sizes', 'N/A')}",
-            f"• Unique colors  : {summary.get('unique_colors', 'N/A')}",
-            f"• Total units    : {summary.get('total_units', 'N/A'):,}",
-            f"• Date range     : {summary.get('date_min', '?')} to {summary.get('date_max', '?')}",
-            f"• Years covered  : {summary.get('years_covered', 'N/A')}",
+            f"Total records  : {summary.get('total_records', 'N/A'):,}",
+            f"Unique SKUs    : {summary.get('unique_skus', 'N/A')}",
+            f"Unique sizes   : {summary.get('unique_sizes', 'N/A')}",
+            f"Unique colors  : {summary.get('unique_colors', 'N/A')}",
+            f"Total units    : {summary.get('total_units', 'N/A'):,}",
+            f"Date range     : {summary.get('date_min', '?')} to {summary.get('date_max', '?')}",
+            f"Years covered  : {summary.get('years_covered', 'N/A')}",
         ]
 
     # Cluster results
     if cluster_result is not None and not cluster_result.empty:
-        lines += ["", "═══ CLUSTER / PARTITION ANALYSIS ═══"]
+        lines += ["", "=== CLUSTER / PARTITION ANALYSIS ==="]
         if "cluster_label" in cluster_result.columns:
             for lbl, grp in cluster_result.groupby("cluster_label"):
                 skus = grp["c_sku"].tolist() if "c_sku" in grp.columns else []
                 vol = int(grp["total_qty"].sum()) if "total_qty" in grp.columns else 0
-                lines.append(f"• [{lbl}] – {len(skus)} SKUs, total vol {vol:,}")
+                lines.append(f"[{lbl}] - {len(skus)} SKUs, total vol {vol:,}")
                 lines.append(f"  SKUs: {', '.join(skus[:8])}{'...' if len(skus) > 8 else ''}")
         if "abc" in cluster_result.columns:
             abc_cnt = cluster_result["abc"].value_counts().to_dict()
-            lines.append(f"• ABC – A:{abc_cnt.get('A',0)} B:{abc_cnt.get('B',0)} C:{abc_cnt.get('C',0)} SKUs")
+            lines.append(f"ABC - A:{abc_cnt.get('A',0)} B:{abc_cnt.get('B',0)} C:{abc_cnt.get('C',0)} SKUs")
         if "xyz" in cluster_result.columns:
             xyz_cnt = cluster_result["xyz"].value_counts().to_dict()
-            lines.append(f"• XYZ – X:{xyz_cnt.get('X',0)} Y:{xyz_cnt.get('Y',0)} Z:{xyz_cnt.get('Z',0)} SKUs")
+            lines.append(f"XYZ - X:{xyz_cnt.get('X',0)} Y:{xyz_cnt.get('Y',0)} Z:{xyz_cnt.get('Z',0)} SKUs")
 
     # Statistical context (top SKUs)
     if stats_context:
-        lines += ["", "═══ STATISTICAL INSIGHTS ═══"]
+        lines += ["", "=== STATISTICAL INSIGHTS ==="]
         top_skus = stats_context.get("top_skus_by_volume", [])[:10]
-        lines.append(f"• Top SKUs by volume: {', '.join(top_skus)}")
+        lines.append(f"Top SKUs by volume: {', '.join(top_skus)}")
         ts = stats_context.get("trend_summary", {})
         up = ts.get("uptrend_skus", [])[:6]
         dn = ts.get("downtrend_skus", [])[:6]
         if up:
-            lines.append(f"• Growing (uptrend) SKUs: {', '.join(up)}")
+            lines.append(f"Growing (uptrend) SKUs: {', '.join(up)}")
         if dn:
-            lines.append(f"• Declining SKUs: {', '.join(dn)}")
+            lines.append(f"Declining SKUs: {', '.join(dn)}")
 
         sku_stats = stats_context.get("sku_stats", {})
         if sku_stats:
-            lines.append("• Key SKU details:")
+            lines.append("Key SKU details:")
             for sku, st in list(sku_stats.items())[:8]:
                 lines.append(
                     f"  {sku}: avg {st.get('avg_monthly', 0):,.0f}/mo, "
@@ -236,19 +257,23 @@ def build_system_prompt(
 
     # Production plan
     if plan_df is not None and not plan_df.empty:
-        lines += ["", "═══ PRODUCTION PLAN (latest run) ═══"]
-        top5 = plan_df.nlargest(5, "avg_monthly_qty") if "avg_monthly_qty" in plan_df.columns else plan_df.head(5)
+        lines += ["", "=== PRODUCTION PLAN (latest run) ==="]
+        top5 = (
+            plan_df.nlargest(5, "avg_monthly_qty")
+            if "avg_monthly_qty" in plan_df.columns
+            else plan_df.head(5)
+        )
         for _, r in top5.iterrows():
             lines.append(
-                f"• {r.get('c_sku','?')}: avg {r.get('avg_monthly_qty',0):,.0f}/mo, "
+                f"{r.get('c_sku','?')}: avg {r.get('avg_monthly_qty',0):,.0f}/mo, "
                 f"SS={r.get('safety_stock',0):,.0f}, "
                 f"6m forecast={r.get('total_planned',0):,.0f}"
             )
 
     lines += [
         "",
-        "═══ INSTRUCTIONS ═══",
-        "When the user asks about a specific SKU, size, or color – refer to the data above.",
+        "=== INSTRUCTIONS ===",
+        "When the user asks about a specific SKU, size, or color - refer to the data above.",
         "When you give numerical recommendations, state the source (cluster / trend / forecast).",
         "If the user provides additional data (classification labels, numbers), analyse them directly.",
     ]
