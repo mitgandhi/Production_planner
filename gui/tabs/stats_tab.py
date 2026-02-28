@@ -82,6 +82,8 @@ class StatsWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class StatsTab(QWidget):
+    context_ready = pyqtSignal(dict)   # emits Qwen3 context dict after analysis
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._df: pd.DataFrame | None = None
@@ -288,6 +290,8 @@ class StatsTab(QWidget):
         # Qwen context
         ctx_str = json.dumps(results["context"], indent=2)
         self._qwen_text.setPlainText(ctx_str)
+        # Emit signal so MainWindow can forward context to AI tab
+        self.context_ready.emit(results["context"])
 
     def _plot_distribution(self):
         if self._df is None or self._dist_sku_combo.currentText() == "":

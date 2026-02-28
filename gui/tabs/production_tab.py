@@ -60,6 +60,8 @@ class PlanWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class ProductionTab(QWidget):
+    plan_ready = pyqtSignal(object)   # emits plan_df after generation
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._df: pd.DataFrame | None = None
@@ -225,6 +227,7 @@ class ProductionTab(QWidget):
 
         self._plan_df = plan_df
         self._status.setText("Done.")
+        self.plan_ready.emit(plan_df)
 
         # Table
         display_cols = [c for c in plan_df.columns

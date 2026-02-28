@@ -26,6 +26,7 @@ from gui.tabs.clustering_tab import ClusteringTab
 from gui.tabs.stats_tab import StatsTab
 from gui.tabs.production_tab import ProductionTab
 from gui.tabs.ai_tab import AITab
+from gui.model_manager import ModelManager
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +192,9 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._apply_theme()
 
+        # Preload Qwen3-VL as soon as the window is built
+        self._start_model_preload()
+
     # ------------------------------------------------------------------
     # Window skeleton
     # ------------------------------------------------------------------
@@ -253,6 +257,10 @@ class MainWindow(QMainWindow):
 
         # Wire signals
         self._clustering.cluster_done.connect(self._on_cluster_done)
+        self._stats.context_ready.connect(self._on_stats_context_ready)
+        self._production.plan_ready.connect(
+            lambda df: self._ai.set_analysis_data(plan_df=df)
+        )
 
     def _build_statusbar(self):
         self._status_bar = QStatusBar()
@@ -264,6 +272,24 @@ class MainWindow(QMainWindow):
         self._status_bar.addPermanentWidget(self._prog)
         self._status_lbl = QLabel("Ready – Load data to begin.")
         self._status_bar.addWidget(self._status_lbl)
+
+    def _start_model_preload(self):
+        """Kick off Qwen3-VL model loading in background immediately."""
+        self._status_lbl.setText("Loading Qwen3-VL model in background…")
+        mm = ModelManager.get()
+        mm.start_loading(callback=self._on_model_loaded)
+
+    def _on_model_loaded(self, success: bool, message: str):
+        """Called from background thread – post to main thread via signal."""
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        # Use invokeMethod to safely update GUI from non-GUI thread
+        from PyQt6.QtCore import QMetaObject
+        QMetaObject.invokeMethod(
+            self, "_on_model_loaded_main",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(bool, success),
+            Q_ARG(str, message),
+        )
 
     # ------------------------------------------------------------------
     # Theme
@@ -331,6 +357,13 @@ class MainWindow(QMainWindow):
         self._stats.set_data(df)
         self._production.set_data(df)
 
+        # Seed AI tab with dataset summary immediately
+        self._ai.set_analysis_data(summary=summary)
+
+        # Wire stats worker to feed context to AI tab after stats run
+        if hasattr(self._stats, '_worker') is False:
+            self._stats._run_btn.clicked.connect(self._connect_stats_signal)
+
     # ------------------------------------------------------------------
     # Cross-tab signals
     # ------------------------------------------------------------------
@@ -338,14 +371,29 @@ class MainWindow(QMainWindow):
     def _on_cluster_done(self, result_df: pd.DataFrame):
         self._cluster_result = result_df
         self._production.set_cluster_result(result_df)
+        # Push cluster labels to AI tab
+        self._ai.set_analysis_data(cluster_result=result_df)
 
     def _on_stats_context_ready(self, context: dict):
         self._qwen_context = context
-        self._ai.set_context(context)
+        self._ai.set_analysis_data(stats_context=context)
+
+    from PyQt6.QtCore import pyqtSlot
+
+    @pyqtSlot(bool, str)
+    def _on_model_loaded_main(self, success: bool, message: str):
+        """Runs in the main (GUI) thread after model finishes loading."""
+        self._ai.on_model_ready(success, message)
+        if success:
+            self._status_lbl.setText("Qwen3-VL model ready  •  " + self._status_lbl.text())
 
     # ------------------------------------------------------------------
     # About
     # ------------------------------------------------------------------
+
+    def _connect_stats_signal(self):
+        """Connect the stats worker finished signal once it's created."""
+        pass  # stats_tab._on_done already calls _results; we poll via cluster_done
 
     def _show_about(self):
         QMessageBox.about(
