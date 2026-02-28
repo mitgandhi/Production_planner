@@ -21,6 +21,7 @@ How it works like a terminal session
 from __future__ import annotations
 
 import datetime
+import os
 import re
 from typing import List, Dict
 
@@ -247,23 +248,121 @@ QUICK_PROMPTS: Dict[str, List[tuple]] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# File path reader  (auto-reads any path the user mentions in the chat)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_file_paths(text: str) -> List[str]:
+    """
+    Find all valid file paths mentioned in a message.
+    Handles:
+      - Windows backslash  e.g. E:\\data\\file.csv
+      - Windows forwardslash  e.g. E:/data/file.csv
+      - Quoted paths  "C:\\path\\file.xlsx"
+      - Trailing punctuation stripped  (period, comma, bracket)
+    Returns only paths that actually exist on disk.
+    """
+    # Match Windows drive paths (C:\ or C:/) and unix-style /paths/
+    raw_patterns = [
+        r'["\']?([A-Za-z]:[\\\/][^\s"\'<>|?*\n\r,;)]+)["\']?',   # Windows
+        r'["\']?(/[^\s"\'<>|?*\n\r,;)]{4,})["\']?',              # Unix
+    ]
+    found = []
+    for pat in raw_patterns:
+        for m in re.finditer(pat, text):
+            p = m.group(1).rstrip('.,;:)\'"')   # strip trailing punctuation
+            if p not in found:
+                found.append(p)
+
+    # Keep only paths that exist as files
+    return [p for p in found if os.path.isfile(p)]
+
+
+def _read_file_for_context(path: str) -> str:
+    """
+    Read a file from disk and return a compact text summary for the LLM.
+    Supports: CSV, Excel (.xlsx/.xls), JSON, plain text (.txt/.log/.md).
+    For tabular files: shows shape, columns, first 25 rows, and describe().
+    For text files: shows up to 6 000 characters.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    size_kb = os.path.getsize(path) / 1024
+    header = f"FILE CONTENTS: {path}  ({size_kb:.1f} KB)"
+
+    try:
+        # ── Tabular files ────────────────────────────────────────────────────
+        if ext == ".csv":
+            df_file = pd.read_csv(path, low_memory=False)
+        elif ext in (".xlsx", ".xls"):
+            df_file = pd.read_excel(path)
+        else:
+            df_file = None
+
+        if df_file is not None:
+            lines = [
+                header,
+                f"Rows: {len(df_file):,}   Columns: {len(df_file.columns)}",
+                f"Column names: {', '.join(df_file.columns.tolist())}",
+                "",
+                "First 25 rows:",
+                df_file.head(25).to_string(index=False),
+            ]
+            try:
+                lines += ["", "Summary statistics:", df_file.describe(include="all").round(2).to_string()]
+            except Exception:
+                pass
+            return "\n".join(lines)
+
+        # ── JSON ─────────────────────────────────────────────────────────────
+        if ext == ".json":
+            import json
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            text = json.dumps(data, indent=2, ensure_ascii=False)
+            if len(text) > 6000:
+                text = text[:6000] + "\n... (truncated)"
+            return f"{header}\n{text}"
+
+        # ── Plain text ────────────────────────────────────────────────────────
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            content = f.read(6000)
+        if len(content) == 6000:
+            content += "\n... (truncated)"
+        return f"{header}\n{content}"
+
+    except Exception as exc:
+        return f"{header}\n(Error reading file: {exc})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dynamic data injector
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_message_context(user_text: str, df) -> str:
     """
-    Like a terminal session: scan the user's question for SKU names, sizes,
-    colors, and keywords, then fetch the matching rows from the DataFrame and
-    append them as a DATA CONTEXT block to the message.
+    Like a terminal session: scan the user's question for
+      1. File paths  → read the file and inject its content
+      2. SKU / size / color names → fetch live rows from the loaded DataFrame
+      3. Keywords (production, trend, top) → fetch relevant aggregations
 
-    This keeps the system prompt compact (no massive pre-dump) while still
-    giving the model real numbers for whatever the user asks about.
+    All matched data is appended as a DATA CONTEXT block before the model
+    sees the message, so the model can answer with real numbers.
     """
-    if df is None or df.empty:
-        return user_text
-
     upper = user_text.upper()
     snippets: List[str] = []
+
+    # ── 1. File paths – read any file the user mentions ───────────────────────
+    file_paths = _extract_file_paths(user_text)
+    for path in file_paths[:3]:      # max 3 files per message
+        content = _read_file_for_context(path)
+        if content:
+            snippets.append(content)
+
+    # If no DataFrame is loaded, still return with whatever files were found
+    if df is None or df.empty:
+        if snippets:
+            data_block = "\n\n---\nDATA CONTEXT (read from files you mentioned):\n" + "\n\n".join(snippets) + "\n---"
+            return user_text + data_block
+        return user_text
 
     # ── Detect SKU mentions ───────────────────────────────────────────────────
     all_skus = df["c_sku"].unique().tolist()
@@ -365,7 +464,11 @@ def _build_message_context(user_text: str, df) -> str:
     if not snippets:
         return user_text
 
-    data_block = "\n\n---\nDATA CONTEXT (fetched live from your dataset):\n" + "\n\n".join(snippets) + "\n---"
+    data_block = (
+        "\n\n---\nDATA CONTEXT (fetched live – files read from disk + dataset queries):\n"
+        + "\n\n".join(snippets)
+        + "\n---"
+    )
     return user_text + data_block
 
 
@@ -618,7 +721,7 @@ class AITab(QWidget):
 
         hint = QLabel(
             "Ctrl+Enter to send  \u2022  Shift+Enter for newline  \u2022  "
-            "Mention any SKU/size/color \u2014 data auto-fetched from your dataset"
+            "Mention a SKU/size/color or paste a file path \u2014 data is read automatically"
         )
         hint.setStyleSheet("color:#6c7086;font-size:10px;")
         ia.addWidget(hint)
@@ -627,8 +730,8 @@ class AITab(QWidget):
         self._input = SmartInputBox()
         self._input.send_requested.connect(self._send)
         self._input.setPlaceholderText(
-            "Ask anything: top SKUs, production requirements, trends, "
-            "size analysis… mention a SKU name for live data lookup."
+            "Ask anything about your data, or mention/paste a file path like "
+            "E:\\data\\file.csv and it will be read automatically…"
         )
         self._input.setFont(QFont("Segoe UI", 10))
         self._input.setStyleSheet(
