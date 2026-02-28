@@ -288,6 +288,144 @@ class ModelManager:
 
 
 # ------------------------------------------------------------------
+# Data context builder  (injects actual DataFrame rows into the prompt)
+# ------------------------------------------------------------------
+
+def build_data_context(df) -> str:
+    """
+    Convert the loaded DataFrame into a comprehensive text report that the
+    LLM can read as if it were given the file contents directly.
+
+    Sections included
+    -----------------
+    1. Monthly total sales (last 24 months)
+    2. All SKUs ranked by volume  (total, avg/month, CV%)
+    3. Top 30 SKUs – last 12 months month-by-month breakdown
+    4. Production estimates (last 90 days basis, 45-day horizon)
+    5. Size distribution
+    6. Color distribution (top 20)
+    7. Top 50 SKU x Size x Color combinations
+    """
+    import pandas as pd
+    import numpy as np
+
+    if df is None or df.empty:
+        return "(No data loaded yet.)"
+
+    lines: list[str] = []
+
+    # ── 1. Monthly totals (last 24 months) ──────────────────────────────────
+    monthly_total = df.groupby("date")["c_qty"].sum().sort_index()
+    lines += ["=== MONTHLY TOTAL SALES (last 24 months) ==="]
+    for dt, qty in monthly_total.tail(24).items():
+        lines.append(f"  {dt.strftime('%b-%Y')}: {int(qty):,}")
+
+    # ── 2. All SKUs ranked by volume ─────────────────────────────────────────
+    monthly_sku = df.groupby(["date", "c_sku"])["c_qty"].sum().reset_index()
+    sku_agg = (
+        monthly_sku.groupby("c_sku")["c_qty"]
+        .agg(total="sum", mean="mean", std="std")
+    )
+    sku_agg["cv_pct"] = (
+        (sku_agg["std"] / sku_agg["mean"] * 100)
+        .fillna(0)
+        .round(1)
+    )
+    sku_agg = sku_agg.sort_values("total", ascending=False)
+
+    lines += [
+        "",
+        "=== ALL SKUs RANKED BY TOTAL VOLUME ===",
+        f"{'SKU':<12} | {'Total Units':>11} | {'Avg/Month':>9} | {'CV%':>6}",
+        "-" * 48,
+    ]
+    for sku, row in sku_agg.iterrows():
+        lines.append(
+            f"{str(sku):<12} | {int(row['total']):>11,} | "
+            f"{row['mean']:>9,.0f} | {row['cv_pct']:>5.1f}%"
+        )
+
+    # ── 3. Top 30 SKUs – last 12 months breakdown ────────────────────────────
+    top30 = sku_agg.head(30).index.tolist()
+    last_12_cutoff = monthly_sku["date"].max() - pd.DateOffset(months=11)
+    last_12 = monthly_sku[
+        (monthly_sku["date"] >= last_12_cutoff) &
+        (monthly_sku["c_sku"].isin(top30))
+    ]
+    pivot = last_12.pivot_table(
+        index="c_sku", columns="date", values="c_qty", fill_value=0
+    )
+    pivot.columns = [c.strftime("%b%y") for c in pivot.columns]
+
+    col_hdr = " | ".join(f"{c:>6}" for c in pivot.columns)
+    lines += [
+        "",
+        "=== TOP 30 SKUs - LAST 12 MONTHS (monthly qty) ===",
+        f"{'SKU':<12} | {col_hdr}",
+        "-" * (14 + len(pivot.columns) * 9),
+    ]
+    for sku, row in pivot.iterrows():
+        vals = " | ".join(f"{int(v):>6,}" for v in row.values)
+        lines.append(f"{str(sku):<12} | {vals}")
+
+    # ── 4. Production estimates ───────────────────────────────────────────────
+    try:
+        from src.production_planning import current_production_estimate
+        prod_est = current_production_estimate(df, sales_days=90, production_days=45)
+        lines += [
+            "",
+            "=== PRODUCTION ESTIMATES (basis: last 90 days sales, 45-day production horizon) ===",
+            f"{'SKU':<12} | {'Size':<6} | {'Color':<8} | {'90d Sales':>9} | {'Per-Day':>7} | {'Prod Req (45d)':>13}",
+            "-" * 68,
+        ]
+        for _, r in prod_est.head(120).iterrows():
+            lines.append(
+                f"{str(r['c_sku']):<12} | {str(r['c_sz']):<6} | "
+                f"{str(r['c_cl']):<8} | {int(r['total_sales_90d']):>9,} | "
+                f"{r['per_day_sales_qty']:>7.2f} | {int(r['production_req_qty']):>13,}"
+            )
+    except Exception as _e:
+        lines.append(f"(Production estimates unavailable: {_e})")
+
+    # ── 5. Size distribution ──────────────────────────────────────────────────
+    size_agg = df.groupby("c_sz")["c_qty"].sum().sort_values(ascending=False)
+    total_qty = int(size_agg.sum())
+    lines += ["", "=== SIZE DISTRIBUTION ==="]
+    for sz, qty in size_agg.items():
+        lines.append(
+            f"  Size {str(sz):<8}: {int(qty):>10,} units  ({qty/total_qty*100:.1f}%)"
+        )
+
+    # ── 6. Color distribution (top 20) ────────────────────────────────────────
+    color_agg = df.groupby("c_cl")["c_qty"].sum().sort_values(ascending=False)
+    lines += ["", "=== COLOR DISTRIBUTION (top 20) ==="]
+    for cl, qty in color_agg.head(20).items():
+        lines.append(
+            f"  Color {str(cl):<10}: {int(qty):>10,} units  ({qty/total_qty*100:.1f}%)"
+        )
+
+    # ── 7. Top 50 SKU × Size × Color combos ──────────────────────────────────
+    combo = (
+        df.groupby(["c_sku", "c_sz", "c_cl"])["c_qty"]
+        .sum().reset_index()
+        .sort_values("c_qty", ascending=False)
+    )
+    lines += [
+        "",
+        "=== TOP 50 SKU x SIZE x COLOR COMBINATIONS ===",
+        f"{'SKU':<12} | {'Size':<6} | {'Color':<10} | {'Total Units':>11}",
+        "-" * 48,
+    ]
+    for _, r in combo.head(50).iterrows():
+        lines.append(
+            f"{str(r['c_sku']):<12} | {str(r['c_sz']):<6} | "
+            f"{str(r['c_cl']):<10} | {int(r['c_qty']):>11,}"
+        )
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
 # System prompt builder
 # ------------------------------------------------------------------
 
@@ -296,6 +434,7 @@ def build_system_prompt(
     cluster_result=None,
     stats_context: dict | None = None,
     plan_df=None,
+    df=None,           # <-- actual DataFrame for rich data injection
 ) -> str:
     """
     Build a rich, structured system prompt from all available analysis artefacts.
@@ -304,8 +443,11 @@ def build_system_prompt(
     lines = [
         "You are an expert AI Production Planning Assistant for Gem Computers, "
         "an apparel manufacturing company specialising in women's intimate apparel (bras).",
-        "Answer questions analytically. Use the data context below as your knowledge base.",
-        "Be concise, precise, and always support recommendations with numbers from the data.",
+        "",
+        "IMPORTANT: The complete inventory dataset has been loaded and is embedded below.",
+        "You have full access to every SKU, size, color, monthly sales figure, and production",
+        "estimate. Treat this data as if you have read the file yourself.",
+        "Always answer with specific numbers from the data. Never say you cannot access the file.",
         "",
         "=== DATASET OVERVIEW ===",
     ]
@@ -321,6 +463,11 @@ def build_system_prompt(
             f"Years covered  : {summary.get('years_covered', 'N/A')}",
         ]
 
+    # ── Inject actual data tables from the DataFrame ─────────────────────────
+    if df is not None:
+        lines += ["", build_data_context(df)]
+
+    # ── Cluster results ───────────────────────────────────────────────────────
     if cluster_result is not None and not cluster_result.empty:
         lines += ["", "=== CLUSTER / PARTITION ANALYSIS ==="]
         if "cluster_label" in cluster_result.columns:
@@ -336,8 +483,9 @@ def build_system_prompt(
             xyz_cnt = cluster_result["xyz"].value_counts().to_dict()
             lines.append(f"XYZ - X:{xyz_cnt.get('X',0)} Y:{xyz_cnt.get('Y',0)} Z:{xyz_cnt.get('Z',0)} SKUs")
 
+    # ── Statistical insights ──────────────────────────────────────────────────
     if stats_context:
-        lines += ["", "=== STATISTICAL INSIGHTS ==="]
+        lines += ["", "=== STATISTICAL INSIGHTS (from Stats tab) ==="]
         top_skus = stats_context.get("top_skus_by_volume", [])[:10]
         lines.append(f"Top SKUs by volume: {', '.join(top_skus)}")
         ts = stats_context.get("trend_summary", {})
@@ -358,8 +506,9 @@ def build_system_prompt(
                     f"peak_month=M{st.get('peak_month', '?')}"
                 )
 
+    # ── Production plan ───────────────────────────────────────────────────────
     if plan_df is not None and not plan_df.empty:
-        lines += ["", "=== PRODUCTION PLAN (latest run) ==="]
+        lines += ["", "=== PRODUCTION PLAN (latest run from Production tab) ==="]
         top5 = (
             plan_df.nlargest(5, "avg_monthly_qty")
             if "avg_monthly_qty" in plan_df.columns
@@ -375,9 +524,11 @@ def build_system_prompt(
     lines += [
         "",
         "=== INSTRUCTIONS ===",
-        "When the user asks about a specific SKU, size, or color - refer to the data above.",
-        "When you give numerical recommendations, state the source (cluster / trend / forecast).",
-        "If the user provides additional data (classification labels, numbers), analyse them directly.",
+        "You have READ the dataset above. Answer every question using the actual numbers.",
+        "Never say 'I cannot access the file' - the data IS already here in this prompt.",
+        "When asked about a SKU, size, or color - look it up in the tables above and cite the number.",
+        "When you give recommendations, state which table/section the data came from.",
+        "If the user pastes additional data, analyse it together with the embedded dataset.",
     ]
 
     return "\n".join(lines)

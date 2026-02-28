@@ -355,8 +355,8 @@ class MainWindow(QMainWindow):
         self._stats.set_data(df)
         self._production.set_data(df)
 
-        # Seed AI tab with dataset summary immediately
-        self._ai.set_analysis_data(summary=summary)
+        # Seed AI tab with full DataFrame + summary so the model can read the data
+        self._ai.set_analysis_data(summary=summary, df=df)
 
         # Wire stats worker to feed context to AI tab after stats run
         if hasattr(self._stats, '_worker') is False:
@@ -369,12 +369,11 @@ class MainWindow(QMainWindow):
     def _on_cluster_done(self, result_df: pd.DataFrame):
         self._cluster_result = result_df
         self._production.set_cluster_result(result_df)
-        # Push cluster labels to AI tab
-        self._ai.set_analysis_data(cluster_result=result_df)
+        self._ai.set_analysis_data(cluster_result=result_df, df=self._df)
 
     def _on_stats_context_ready(self, context: dict):
         self._qwen_context = context
-        self._ai.set_analysis_data(stats_context=context)
+        self._ai.set_analysis_data(stats_context=context, df=self._df)
 
     def _on_model_loaded_main(self, success: bool, message: str):
         """Runs in the main (GUI) thread – called via _model_ready_signal."""

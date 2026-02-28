@@ -297,6 +297,7 @@ class AITab(QWidget):
         self._cluster_result = None
         self._stats_context: dict = {}
         self._plan_df = None
+        self._df = None          # raw DataFrame – injected into system prompt
 
         self._init_ui()
         self._init_cursor_timer()
@@ -616,6 +617,7 @@ class AITab(QWidget):
         cluster_result=None,
         stats_context: dict | None = None,
         plan_df=None,
+        df=None,           # raw DataFrame – gives the LLM actual data access
     ):
         if summary is not None:
             self._summary = summary
@@ -625,6 +627,8 @@ class AITab(QWidget):
             self._stats_context = stats_context
         if plan_df is not None:
             self._plan_df = plan_df
+        if df is not None:
+            self._df = df
         self._rebuild_system_prompt()
 
     # ──────────────────────────────────────────────────────────────────
@@ -637,9 +641,13 @@ class AITab(QWidget):
             cluster_result=self._cluster_result,
             stats_context=self._stats_context or None,
             plan_df=self._plan_df,
+            df=self._df,
         )
         parts = []
-        if self._summary:
+        if self._df is not None:
+            rows = len(self._df)
+            parts.append(f"DATA ({rows:,} rows)")
+        elif self._summary:
             parts.append(f"{self._summary.get('unique_skus','?')} SKUs")
         if self._cluster_result is not None:
             parts.append("clusters")
@@ -648,7 +656,7 @@ class AITab(QWidget):
         if self._plan_df is not None:
             parts.append("plan")
         self._ctx_lbl.setText(
-            "Context: " + (", ".join(parts) if parts else "overview only")
+            "Context: " + (", ".join(parts) if parts else "not loaded")
         )
 
     # ──────────────────────────────────────────────────────────────────
