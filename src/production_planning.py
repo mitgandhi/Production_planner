@@ -205,6 +205,45 @@ def build_production_plan(
 
 
 # ---------------------------------------------------------------------------
+# Current Production Estimate  (per SKU × Size × Color)
+# ---------------------------------------------------------------------------
+
+def current_production_estimate(df: pd.DataFrame, sales_days: int = 90, production_days: int = 45) -> pd.DataFrame:
+    """
+    For every SKU + Size + Color combination calculate:
+        PerDaySalesQty   = Total Sales (last `sales_days` days) / sales_days
+        ProductionReqQty = PerDaySalesQty × production_days
+
+    Parameters
+    ----------
+    df              : preprocessed DataFrame (must have 'date', 'c_sku', 'c_sz', 'c_cl', 'c_qty')
+    sales_days      : lookback window in days (default 90)
+    production_days : forward production horizon in days (default 45)
+    """
+    max_date = df["date"].max()
+    cutoff   = max_date - pd.Timedelta(days=sales_days)
+
+    recent = df[df["date"] > cutoff]
+
+    agg = (
+        recent
+        .groupby(["c_sku", "c_sz", "c_cl"], as_index=False)["c_qty"]
+        .sum()
+        .rename(columns={"c_qty": "total_sales_90d"})
+    )
+
+    agg["per_day_sales_qty"]  = (agg["total_sales_90d"] / sales_days).round(2)
+    agg["production_req_qty"] = (agg["per_day_sales_qty"] * production_days).round(0).astype(int)
+
+    # tidy column order & sort by production requirement descending
+    agg = agg[["c_sku", "c_sz", "c_cl",
+               "total_sales_90d", "per_day_sales_qty", "production_req_qty"]]
+    agg = agg.sort_values("production_req_qty", ascending=False).reset_index(drop=True)
+
+    return agg
+
+
+# ---------------------------------------------------------------------------
 # Summary recommendations (text)
 # ---------------------------------------------------------------------------
 

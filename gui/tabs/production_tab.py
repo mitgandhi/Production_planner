@@ -18,10 +18,10 @@ from PyQt6.QtWidgets import (
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
+from PyQt6.QtWidgets import QLineEdit, QTableView
 from src import production_planning as pp, plots
 from gui.tabs.data_explorer_tab import PandasModel
 from PyQt6.QtCore import QSortFilterProxyModel
-from PyQt6.QtWidgets import QTableView
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +149,73 @@ class ProductionTab(QWidget):
         export_btn.clicked.connect(self._export_plan)
         plnl.addWidget(export_btn)
         self._tabs.addTab(plan_w, "Production Plan Table")
+
+        # ── Current Production Estimate (SKU × Size × Color) ──────────
+        est_w = QWidget()
+        estl = QVBoxLayout(est_w)
+
+        # controls row
+        est_ctrl = QHBoxLayout()
+        est_ctrl.addWidget(QLabel("Sales window (days):"))
+        self._sales_days_spin = QSpinBox()
+        self._sales_days_spin.setRange(7, 365)
+        self._sales_days_spin.setValue(90)
+        self._sales_days_spin.setFixedWidth(70)
+        est_ctrl.addWidget(self._sales_days_spin)
+
+        est_ctrl.addWidget(QLabel("Production horizon (days):"))
+        self._prod_days_spin = QSpinBox()
+        self._prod_days_spin.setRange(1, 180)
+        self._prod_days_spin.setValue(45)
+        self._prod_days_spin.setFixedWidth(70)
+        est_ctrl.addWidget(self._prod_days_spin)
+
+        est_ctrl.addWidget(QLabel("Filter SKU:"))
+        self._est_filter = QLineEdit()
+        self._est_filter.setPlaceholderText("type to filter…")
+        self._est_filter.setFixedWidth(160)
+        self._est_filter.textChanged.connect(self._apply_est_filter)
+        est_ctrl.addWidget(self._est_filter)
+
+        btn_calc = QPushButton("Calculate")
+        btn_calc.setFixedHeight(28)
+        btn_calc.clicked.connect(self._calc_estimate)
+        est_ctrl.addWidget(btn_calc)
+
+        btn_exp_est = QPushButton("Export CSV")
+        btn_exp_est.setFixedHeight(28)
+        btn_exp_est.clicked.connect(self._export_estimate)
+        est_ctrl.addWidget(btn_exp_est)
+        est_ctrl.addStretch()
+        estl.addLayout(est_ctrl)
+
+        # formula label
+        formula_lbl = QLabel(
+            "  PerDaySalesQty = Total Sales (last N days) ÷ N     |     "
+            "ProductionReqQty = PerDaySalesQty × Production Horizon"
+        )
+        formula_lbl.setStyleSheet("color:#6c7086; font-size:10px; font-style:italic;")
+        estl.addWidget(formula_lbl)
+
+        # table
+        self._est_view = QTableView()
+        self._est_view.setAlternatingRowColors(True)
+        self._est_view.setFont(QFont("Consolas", 8))
+        self._est_view.setSortingEnabled(True)
+        self._est_model = PandasModel(pd.DataFrame())
+        self._est_proxy = QSortFilterProxyModel()
+        self._est_proxy.setSourceModel(self._est_model)
+        self._est_proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._est_proxy.setFilterKeyColumn(-1)   # search all columns
+        self._est_view.setModel(self._est_proxy)
+        estl.addWidget(self._est_view)
+
+        self._est_summary_lbl = QLabel("")
+        self._est_summary_lbl.setStyleSheet("color:#a6adc8; font-size:10px;")
+        estl.addWidget(self._est_summary_lbl)
+
+        self._tabs.addTab(est_w, "Production Estimate")
+        self._est_df: pd.DataFrame | None = None
 
         # Gantt-style chart
         self._gantt_w = QWidget()
@@ -286,6 +353,51 @@ class ProductionTab(QWidget):
                 item.widget().deleteLater()
         canvas = FigureCanvas(fig)
         layout.addWidget(canvas)
+
+    # ------------------------------------------------------------------
+    # Production Estimate helpers
+    # ------------------------------------------------------------------
+
+    def _calc_estimate(self):
+        if self._df is None:
+            QMessageBox.warning(self, "No Data", "Load data first.")
+            return
+        self._est_df = pp.current_production_estimate(
+            self._df,
+            sales_days=self._sales_days_spin.value(),
+            production_days=self._prod_days_spin.value(),
+        )
+        self._est_model.update_data(self._est_df)
+        self._est_view.resizeColumnsToContents()
+        total_req = int(self._est_df["production_req_qty"].sum())
+        rows = len(self._est_df)
+        self._est_summary_lbl.setText(
+            f"{rows} SKU-Size-Color combinations  |  "
+            f"Total Production Required: {total_req:,} units  |  "
+            f"Basis: last {self._sales_days_spin.value()} days → "
+            f"{self._prod_days_spin.value()}-day requirement"
+        )
+
+    def _apply_est_filter(self, text: str):
+        self._est_proxy.setFilterFixedString(text)
+
+    def _export_estimate(self):
+        if self._est_df is None or self._est_df.empty:
+            QMessageBox.warning(self, "No Data", "Calculate estimate first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Estimate", "", "CSV Files (*.csv);;Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            if path.endswith(".xlsx"):
+                self._est_df.to_excel(path, index=False)
+            else:
+                self._est_df.to_csv(path, index=False)
+            QMessageBox.information(self, "Saved", f"Saved to {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", str(exc))
 
     def _export_plan(self):
         if self._plan_df is None:
