@@ -176,6 +176,9 @@ LIGHT_STYLESHEET = ""  # Qt default
 
 
 class MainWindow(QMainWindow):
+    # Thread-safe signal: emitted from background thread → received on GUI thread
+    _model_ready_signal = pyqtSignal(bool, str)
+
     def __init__(self):
         super().__init__()
         self._df: pd.DataFrame | None = None
@@ -191,6 +194,9 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
         self._apply_theme()
+
+        # Connect signal BEFORE starting the background thread
+        self._model_ready_signal.connect(self._on_model_loaded_main)
 
         # Preload Qwen3-VL as soon as the window is built
         self._start_model_preload()
@@ -280,16 +286,8 @@ class MainWindow(QMainWindow):
         mm.start_loading(callback=self._on_model_loaded)
 
     def _on_model_loaded(self, success: bool, message: str):
-        """Called from background thread – post to main thread via signal."""
-        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
-        # Use invokeMethod to safely update GUI from non-GUI thread
-        from PyQt6.QtCore import QMetaObject
-        QMetaObject.invokeMethod(
-            self, "_on_model_loaded_main",
-            Qt.ConnectionType.QueuedConnection,
-            Q_ARG(bool, success),
-            Q_ARG(str, message),
-        )
+        """Called from background thread – safely post to GUI thread via signal."""
+        self._model_ready_signal.emit(success, message)
 
     # ------------------------------------------------------------------
     # Theme
@@ -378,14 +376,13 @@ class MainWindow(QMainWindow):
         self._qwen_context = context
         self._ai.set_analysis_data(stats_context=context)
 
-    from PyQt6.QtCore import pyqtSlot
-
-    @pyqtSlot(bool, str)
     def _on_model_loaded_main(self, success: bool, message: str):
-        """Runs in the main (GUI) thread after model finishes loading."""
+        """Runs in the main (GUI) thread – called via _model_ready_signal."""
         self._ai.on_model_ready(success, message)
         if success:
-            self._status_lbl.setText("Qwen3-VL model ready  •  " + self._status_lbl.text())
+            self._status_lbl.setText("Qwen3-VL ready on GPU  •  Data loaded"
+                                     if "GPU" in message else
+                                     "Qwen3-VL ready on CPU  •  Data loaded")
 
     # ------------------------------------------------------------------
     # About
